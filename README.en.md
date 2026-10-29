@@ -309,7 +309,7 @@ A project is one directory, so indexes, scores (document frequency) and statisti
 
 ### 8-6. HTTP API
 
-`/v1/*` accepts only a Bearer token (a token in the query string is rejected) and **only `GET`** (anything else is 405). The admin API (`/admin/api/*`) uses cookie authentication and also uses `POST`. `limit` is clamped to 1–500.
+`/v1/*` accepts only a Bearer token (a token in the query string is rejected) and **only `GET`** (anything else is 405). The upload route `/v1/ingest` also takes `POST`. The admin API (`/admin/api/*`) uses cookie authentication and also uses `POST`. `limit` is clamped to 1–500.
 
 | Request | Description |
 | --- | --- |
@@ -317,19 +317,25 @@ A project is one directory, so indexes, scores (document frequency) and statisti
 | `GET /v1/stats?project=P` | Segments, records, sessions, time range |
 | `GET /v1/search?project=P&q=<VQL>&limit=20&any=1&semantic=1&partitions=3` | `{"hits":[…],"partitions_used":…,"partitions_skipped":…}`. `semantic=1` needs vectors (400 otherwise). `partitions=N` opens only the newest N partitions |
 | `GET /v1/history?project=P&file=<path>&limit=5` | Turns that touched the file (whole turns), newest first |
+| `POST /v1/ingest?project=P` | Upload events (NDJSON). `{"session":…,"accepted":N,"duplicate":M,"high_seq":H}`. Tokens that may write only |
+| `GET /v1/ingest?project=P&session=S` | Where to resume: `{"session":…,"high_seq":H}`. Tokens that may write only |
 
 | Status | Meaning |
 | --- | --- |
-| 400 | `q`/`file` missing, query error, project mismatch, malformed request |
+| 400 | `q`/`file` missing, query error, project mismatch, malformed request, an invalid upload line (only its number is reported) |
 | 401 | Token missing, wrong, expired or revoked; old unbound token (`WWW-Authenticate: Bearer`) |
 | 404 | No permission or no such project (not distinguished), admin API for a non-admin user |
-| 405 | A request other than GET to `/v1/*` |
-| 413 | Request body over 64 KiB |
+| 405 | A method `/v1/*` does not allow |
+| 409 | The uploaded session id already belongs to someone else (or is a session that exists only in a server-local log) |
+| 411 | An upload without `Content-Length` |
+| 413 | Request body over 64 KiB (an upload may carry 4 MiB, a session file may grow to 64 MiB) |
 | 431 | Request line or header line too long, or more than 64 headers |
 | 421 | The `Host` of a browser path does not match `public_url` |
 | 500 | The project cannot be opened, read error (including corruption) |
 | 501 | Chunked request body |
-| 503 | Connection limit exceeded, all read engines busy for more than 10 s, the snapshot keeps moving, the project cannot be written |
+| 503 | Connection limit exceeded, more than 4 large uploads at once, all read engines busy for more than 10 s, the snapshot keeps moving, the project cannot be written, an upload could not be written to disk (send it again) |
+
+**Upload (`/v1/ingest`)**: only a token that may write (scope `write` or `rw`, and write permission in the project) can use it. The `POST` body is NDJSON (one event per line) and one request carries one session (up to 4 MiB per request, 1 MiB per line, 10,000 events). Every line is checked for `session`, `seq`, `kind` and `at` (not before 2020 and not more than 5 minutes ahead of the server clock), and one bad line refuses the whole request. The server overwrites `owner` with the uploading user and masks secrets (keys, tokens, passwords) once more. The answer is sent only after the data has been fsynced. A line whose `seq` is at or below `high_seq` is counted as a duplicate and skipped, so sending the same request again changes nothing. To resume, use the `high_seq` of the last answer or ask with `GET /v1/ingest`. A session id belongs to the first user that uploads it; another user using the same id gets the same 409 whatever the reason, and it does not name the owner. Uploaded data becomes searchable from the next ingest tick (`ingest_interval_secs`). With `auth = "off"` uploads are not accepted (404). A body over 64 KiB is read only after the token in its headers has been checked.
 
 A request sees the data as of the last finished ingest tick. The reading side is a pool of read-only engines (`Engine::refresh` catches up with the writer's commits in place), and searches keep answering during ingest.
 
@@ -339,12 +345,13 @@ A request sees the data as of the last finished ingest tick. The reading side is
 - Login is Google OIDC (authorization code + PKCE). Sessions live in server memory (a restart logs everyone out), and the cookie is `HttpOnly`, `SameSite=Lax`, and `Secure` on https. The admin API checks CSRF (JSON type + `X-CSRF-Token` + Origin/Sec-Fetch-Site) and `Host`.
 - A token has the form `vhdb_<8-character id>_<32 bytes base64url>` and the server keeps only its SHA-256 hash. The secret is shown once, right after issue. Comparison is constant-time.
 - The audit log writes logins, token, project and permission changes and every `/v1` request (including denied ones) as JSONL. It stores no tokens or secrets, and a search query is stored only as the first 16 characters of an HMAC under a per-process key plus its length.
-- The request parser has limits: request line 8 KiB, 64 headers, body 64 KiB, chunked refused, 20 s deadline overall (against slowloris).
+- The request parser has limits: request line 8 KiB, 64 headers, body 64 KiB (4 MiB for an upload whose token has been checked), chunked refused, 20 s deadline overall (against slowloris).
 - The release profile uses `panic = "abort"`, so a panic ends the process and systemd restarts it.
 
 ### 8-8. Not there yet
 
-- **Remote upload (`POST /v1/ingest`) and a session ownership registry.** Today the only way for the server to receive data is ingesting the server-local `projects/<name>/sessions/*.jsonl`.
+- **An uploader in the plugin.** The server accepts `POST /v1/ingest`, but nothing calls it yet (the plugin).
+- A storage limit per project or user (today only one session file is capped at 64 MiB and 4 large uploads at once).
 - Login verified with real Google credentials (the whole flow is verified with a fake Google server).
 - A procedure to delete data of leavers or after a leak (the log structure means rebuilding the directory).
 - Persistence of login sessions (everyone is logged out after a restart).
@@ -421,7 +428,7 @@ Server resources were measured on a 2 vCPU / 2 GB VM. "Measured at M0" refers to
 ## 12. Limits and roadmap
 
 - **No cross-project search**: it was not built because it conflicts with the rule that one token reaches one project.
-- **No plugin connection to the server and no remote upload (`POST /v1/ingest`)**: the plugin currently uses only the local (WASM) engine. The engine build inside the plugin is recorded in `vhdb-plugin/engine/SOURCE`.
+- **No plugin connection to the server and no uploader in it**: the server accepts uploads (`POST /v1/ingest`), but the plugin currently uses only the local (WASM) engine. The engine build inside the plugin is recorded in `vhdb-plugin/engine/SOURCE`.
 - A real embedding model connection: for now there is only the hash-based stand-in.
 - Performance candidates: index SST compression, a verified block cache, file handle reuse, faster ingest (about 23 µs/event, dominated by indexing and compaction), candidate intersection for phrase and rare-word queries.
 - Login sessions of the server are memory-only, so a restart logs everyone out.
