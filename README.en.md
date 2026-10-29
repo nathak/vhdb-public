@@ -350,7 +350,6 @@ A request sees the data as of the last finished ingest tick. The reading side is
 
 ### 8-8. Not there yet
 
-- **An uploader in the plugin.** The server accepts `POST /v1/ingest`, but nothing calls it yet (the plugin).
 - A storage limit per project or user (today only one session file is capped at 64 MiB and 4 large uploads at once).
 - Login verified with real Google credentials (the whole flow is verified with a fake Google server).
 - A procedure to delete data of leavers or after a leak (the log structure means rebuilding the directory).
@@ -428,7 +427,7 @@ Server resources were measured on a 2 vCPU / 2 GB VM. "Measured at M0" refers to
 ## 12. Limits and roadmap
 
 - **No cross-project search**: it was not built because it conflicts with the rule that one token reaches one project.
-- **No plugin connection to the server and no uploader in it**: the server accepts uploads (`POST /v1/ingest`), but the plugin currently uses only the local (WASM) engine. The engine build inside the plugin is recorded in `vhdb-plugin/engine/SOURCE`.
+- **The plugin does not read from the server**: the plugin (0.2.0) has an opt-in uploader (off by default) that only sends history to the server; search and injection still use the local (WASM) engine. Searching or injecting the server's history from the plugin does not exist yet. The engine build inside the plugin is recorded in `vhdb-plugin/engine/SOURCE`.
 - A real embedding model connection: for now there is only the hash-based stand-in.
 - Performance candidates: index SST compression, a verified block cache, file handle reuse, faster ingest (about 23 µs/event, dominated by indexing and compaction), candidate intersection for phrase and rare-word queries.
 - Login sessions of the server are memory-only, so a restart logs everyone out.
