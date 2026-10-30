@@ -254,6 +254,7 @@ By default it listens only on `127.0.0.1:7600`. For remote access put a TLS reve
 | --- | --- |
 | `"off"` (default) | Serves a single `data_dir` without accounts. **Starts only on a loopback address.** The `project` of a request is ignored |
 | `"oidc"` | Google login (admin page) + personal API tokens. One directory per project, completely isolated from each other |
+| `"password"` | Like `"oidc"`, but the admin page takes a login name and a password instead of Google ([8-4-2](#8-4-2-using-a-login-name-and-a-password-auth--password)) |
 
 ### 8-3. Configuration keys (`vhdb.toml`)
 
@@ -265,7 +266,7 @@ A flat subset of TOML (`key = value`, ` #` inline comments, `#` comments at the 
 | `data_dir` | `/var/lib/vhdb` | Data. The single directory used when `auth = "off"` |
 | `ingest_interval_secs` | `5` | How often new log lines are taken in |
 | `tiering` | `false` | Move old quarters to warm/cold (off by default because it cannot be undone) |
-| `auth` | `off` | `off` or `oidc` |
+| `auth` | `off` | `off`, `oidc` or `password` |
 | `public_url` | (empty) | The address at which browsers reach the server. The base of the redirect URI. http only on loopback, https otherwise |
 | `projects_dir` | `/var/lib/vhdb/projects` | One `<name>/` directory per project |
 | `state_dir` | `/var/lib/vhdb/control` | Users, projects, permissions, token hashes (`state.json`, up to 14 daily backups) |
@@ -284,7 +285,7 @@ A flat subset of TOML (`key = value`, ` #` inline comments, `#` comments at the 
 | `session_max_hours` | `12` | Maximum lifetime of admin page sessions |
 | `token_max_days` | `90` | Maximum lifetime of a personal API token (clamped to 1–365) |
 
-`auth = "oidc"` needs `public_url`, `oidc_client_id`, at least one well-formed `admin_emails` entry and `max_*` values of 1 or more; if the check fails the server does not start.
+`auth = "oidc"` needs `public_url`, `oidc_client_id`, at least one well-formed `admin_emails` entry and `max_*` values of 1 or more; if the check fails the server does not start. `auth = "password"` needs `public_url` and at least one `admin_emails` entry (a login name or an email) and no `oidc_*` keys.
 
 ### 8-4. Setting up the team server (`auth = "oidc"`)
 
@@ -293,6 +294,27 @@ A flat subset of TOML (`key = value`, ` #` inline comments, `#` comments at the 
 3. In `vhdb.toml` write `auth`, `public_url`, `oidc_client_id`, `admin_emails` (the first administrator) and optionally `allowed_domains`, then `systemctl restart vhdb-server`.
 4. Open `<public_url>/admin` in a browser and log in with the administrator account. Create a **project (repository)**, register **users**, and assign each project a **permission** (read / read+write).
 5. Each user issues a **personal API token** on the same page and uses it in the command line and the plugin.
+
+### 8-4-2. Using a login name and a password (`auth = "password"`)
+
+A mode that signs in with a login name and a password instead of Google. Accounts, projects, permissions and personal API tokens are the same as with `"oidc"`.
+
+```sh
+# 1. vhdb.toml: auth = "password", public_url = "https://…", admin_emails = "admin"
+# 2. Stop the service and set the first administrator's password (run as the service user)
+sudo systemctl stop vhdb-server
+sudo -u vhdb vhdb-server set-password --config /etc/vhdb/vhdb.toml admin
+sudo systemctl start vhdb-server
+```
+
+- The login name is what you wrote in `admin_emails`: lower-case letters, digits, `.`, `_` and `-`, at most 64 characters, or an email address. Case does not matter.
+- `set-password` asks twice on a terminal (nothing is shown) and reads standard input when piped. The password never goes on the command line, in the config file or in the environment. It does not run while the service is up (directory lock) and refuses to run as anyone but the service user (root included; while the state directory does not exist yet it compares with the owner of `/var/lib/vhdb`, where it will go). An account listed in `admin_emails` is made an administrator and enabled again by this command, so it is the way back in after a lock-out.
+- Everything else is on `<public_url>/admin`. Register users on the **Users** tab with a login name and a password and have each person change it under **My account** with their current one. An administrator can reset another user's password (all of that user's login sessions end; API tokens already issued stay valid unless "Revoke API tokens too" is chosen); the page cannot reset your own password or that of an `admin_emails` account.
+- A password has at least 12 characters (counted as characters), at most 256 bytes and one line (no line breaks), and is used exactly as typed (no trimming, no normalisation). The state file keeps only a PBKDF2-HMAC-SHA256 hash (600,000 rounds, a random salt per user); neither the hash nor a password appears in any answer or in the audit log.
+- Guess limits (in server memory, cleared by a restart): five wrong tries for one login name from one address within 15 minutes block that pair; one address is blocked at 20, one login name at 50 over all addresses. A name that does not exist is counted the same way. When the server sits behind a local proxy the address is the **last** entry of `X-Forwarded-For` (what the proxy really saw). At most 4 hash computations run at once; beyond that the answer is 503.
+- A failed login gives the same answer whatever the reason (no such name, wrong password, disabled, no password set). Every login starts a new session and drops one the browser brought along.
+- Guess limits live in server memory, so in an emergency restarting the service releases a login name blocked by 50 failures. If the proxy runs on another computer every client looks like that one proxy address and they can block each other, so keep the proxy on the same computer as the server.
+- Switching between `oidc` and `password` does not delete stored password hashes. An older server cannot read `auth = "password"`, and if you go back to an older server and it writes the state even once, the stored password hashes are gone.
 
 ### 8-5. One connection, one project
 
@@ -342,7 +364,7 @@ A request sees the data as of the last finished ingest tick. The reading side is
 ### 8-7. Admin page and security model
 
 - `<public_url>/admin` — a Korean-language admin page (built into the binary). It has tabs for my account (issue and revoke tokens), users, projects, all tokens and the audit log.
-- Login is Google OIDC (authorization code + PKCE). Sessions live in server memory (a restart logs everyone out), and the cookie is `HttpOnly`, `SameSite=Lax`, and `Secure` on https. The admin API checks CSRF (JSON type + `X-CSRF-Token` + Origin/Sec-Fetch-Site) and `Host`.
+- Login is Google OIDC (authorization code + PKCE) or, with `auth = "password"`, a login name and a password ([8-4-2](#8-4-2-using-a-login-name-and-a-password-auth--password)). Sessions live in server memory (a restart logs everyone out), and the cookie is `HttpOnly`, `SameSite=Lax`, and `Secure` on https. The admin API checks CSRF (JSON type + `X-CSRF-Token` + Origin/Sec-Fetch-Site) and `Host`.
 - A token has the form `vhdb_<8-character id>_<32 bytes base64url>` and the server keeps only its SHA-256 hash. The secret is shown once, right after issue. Comparison is constant-time.
 - The audit log writes logins, token, project and permission changes and every `/v1` request (including denied ones) as JSONL. It stores no tokens or secrets, and a search query is stored only as the first 16 characters of an HMAC under a per-process key plus its length.
 - The request parser has limits: request line 8 KiB, 64 headers, body 64 KiB (4 MiB for an upload whose token has been checked), chunked refused, 20 s deadline overall (against slowloris).
@@ -354,6 +376,7 @@ A request sees the data as of the last finished ingest tick. The reading side is
 - Login verified with real Google credentials (the whole flow is verified with a fake Google server).
 - A procedure to delete data of leavers or after a leak (the log structure means rebuilding the directory).
 - Persistence of login sessions (everyone is logged out after a restart).
+- Two-factor sign-in and a password reset by email in the password mode (a lost password is set again with `set-password` on the server).
 
 ---
 

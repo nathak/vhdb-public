@@ -254,6 +254,7 @@ sudo ./install.sh --start                             # 그 밖: tar.gz를 풀�
 | --- | --- |
 | `"off"` (기본) | 계정 없이 `data_dir` 하나를 제공. **루프백 주소에서만 시작**합니다. 요청의 `project`는 무시 |
 | `"oidc"` | Google 로그인(관리 페이지) + 개인 API 토큰. 프로젝트마다 디렉터리 하나, 서로 완전히 격리 |
+| `"password"` | `"oidc"`와 같되 관리 페이지 로그인이 Google 대신 아이디·비밀번호 ([8-4-2](#8-4-2-아이디와-비밀번호로-쓰기-auth--password)) |
 
 ### 8-3. 설정 키 (`vhdb.toml`)
 
@@ -265,7 +266,7 @@ sudo ./install.sh --start                             # 그 밖: tar.gz를 풀�
 | `data_dir` | `/var/lib/vhdb` | 데이터. `auth = "off"`일 때 쓰는 단일 디렉터리 |
 | `ingest_interval_secs` | `5` | 로그의 새 줄을 반영하는 주기 |
 | `tiering` | `false` | 오래된 분기를 warm/cold로 이동(되돌릴 수 없어 기본 꺼짐) |
-| `auth` | `off` | `off` 또는 `oidc` |
+| `auth` | `off` | `off`, `oidc` 또는 `password` |
 | `public_url` | (비어 있음) | 브라우저가 서버에 닿는 주소. 리디렉션 URI의 기준. http는 루프백만, 그 밖은 https |
 | `projects_dir` | `/var/lib/vhdb/projects` | 프로젝트마다 `<이름>/` 디렉터리 하나 |
 | `state_dir` | `/var/lib/vhdb/control` | 사용자·프로젝트·권한·토큰 해시 (`state.json`, 매일 14개까지 백업) |
@@ -284,7 +285,7 @@ sudo ./install.sh --start                             # 그 밖: tar.gz를 풀�
 | `session_max_hours` | `12` | 관리 페이지 세션 최대 수명 |
 | `token_max_days` | `90` | 개인 API 토큰의 최대 수명 (1~365로 조정) |
 
-`auth = "oidc"`에는 `public_url`, `oidc_client_id`, 형식이 맞는 `admin_emails` 하나 이상, 1 이상의 `max_*` 값이 필요하고, 검사에 실패하면 서버가 시작하지 않습니다.
+`auth = "oidc"`에는 `public_url`, `oidc_client_id`, 형식이 맞는 `admin_emails` 하나 이상, 1 이상의 `max_*` 값이 필요하고, 검사에 실패하면 서버가 시작하지 않습니다. `auth = "password"`에는 `public_url`과 `admin_emails`(로그인 이름 또는 이메일) 하나 이상이 필요하고 `oidc_*`는 필요 없습니다.
 
 ### 8-4. 팀 서버 설정 순서 (`auth = "oidc"`)
 
@@ -293,6 +294,27 @@ sudo ./install.sh --start                             # 그 밖: tar.gz를 풀�
 3. `vhdb.toml`에 `auth`, `public_url`, `oidc_client_id`, `admin_emails`(첫 관리자), 선택으로 `allowed_domains`를 쓰고 `systemctl restart vhdb-server`.
 4. 브라우저로 `<public_url>/admin`에 접속해 관리자 계정으로 로그인합니다. **프로젝트(저장소)**를 만들고, **사용자**를 등록하고, 프로젝트별 **권한**(읽기 / 읽기+쓰기)을 할당합니다.
 5. 각 사용자는 같은 페이지에서 **개인 API 토큰**을 발급해 명령줄·플러그인에 씁니다.
+
+### 8-4-2. 아이디와 비밀번호로 쓰기 (`auth = "password"`)
+
+Google 없이 아이디·비밀번호로 로그인하는 모드입니다. 계정, 프로젝트, 권한, 개인 API 토큰은 `"oidc"`와 같습니다.
+
+```sh
+# 1. vhdb.toml: auth = "password", public_url = "https://…", admin_emails = "admin"
+# 2. 서비스를 멈추고 첫 관리자의 비밀번호를 정합니다 (서비스 사용자로 실행)
+sudo systemctl stop vhdb-server
+sudo -u vhdb vhdb-server set-password --config /etc/vhdb/vhdb.toml admin
+sudo systemctl start vhdb-server
+```
+
+- 로그인 이름은 `admin_emails`에 쓴 그대로입니다. 영문 소문자·숫자·`.`·`_`·`-`로 64자 이하이거나 이메일 주소입니다. 대소문자는 구분하지 않습니다.
+- `set-password`는 터미널에서 두 번 입력받고(화면에 보이지 않음), 파이프로 쓰면 표준입력에서 읽습니다. 비밀번호는 명령줄·설정 파일·환경 변수에 두지 않습니다. 서비스가 도는 동안은 디렉터리 잠금 때문에 실행되지 않고, 서비스 사용자가 아닌 계정(root 포함)으로 실행하면 거부합니다(상태 디렉터리가 아직 없으면 그것이 들어갈 `/var/lib/vhdb`의 소유자와 비교합니다). `admin_emails`에 적힌 계정은 이 명령으로 다시 관리자·사용 가능 상태가 되므로 잠겼을 때의 복구 수단입니다.
+- 이후는 `<public_url>/admin`에서 합니다. **사용자** 탭에서 아이디와 비밀번호를 정해 등록하고, 각자 **내 계정**에서 현재 비밀번호를 넣어 바꾸게 하세요. 관리자는 다른 사용자의 비밀번호를 재설정할 수 있고(그 사용자의 로그인 세션이 모두 끊깁니다. 이미 발급한 API 토큰은 그대로이며 "API 토큰도 폐기"를 고르면 함께 폐기), 본인과 `admin_emails` 계정의 비밀번호는 페이지에서 재설정할 수 없습니다.
+- 비밀번호는 12자 이상(글자 수), 256바이트 이하, 한 줄이어야 하고(줄바꿈 불가) 입력한 그대로 쓰입니다(공백 제거·정규화 없음). 상태 파일에는 PBKDF2-HMAC-SHA256(600,000회, 사용자마다 임의 salt)의 해시만 남고, 해시와 비밀번호는 응답과 감사 기록 어디에도 나오지 않습니다.
+- 추측 제한(서버 메모리, 재시작하면 초기화): 같은 아이디를 같은 주소에서 15분 안에 5번 틀리면 그 조합이 막히고, 주소 하나는 20번, 아이디 하나는 모든 주소를 합쳐 50번에서 막힙니다. 존재하지 않는 아이디도 똑같이 셉니다. 주소는 서버가 로컬 프록시 뒤에 있을 때 `X-Forwarded-For`의 **마지막** 항목(프록시가 실제로 본 주소)입니다. 동시에 도는 해시 계산은 4개까지이고 넘으면 503입니다.
+- 로그인 실패는 이유와 상관없이 같은 답입니다(없는 아이디, 틀린 비밀번호, 비활성, 비밀번호 없음). 로그인할 때마다 새 세션을 만들고, 브라우저가 들고 온 옛 세션은 버립니다.
+- 추측 제한은 서버 메모리에 있어서, 아이디가 50번 실패로 막혔을 때 급하면 서비스를 재시작하면 풀립니다. 프록시가 다른 컴퓨터에 있으면 주소가 모두 프록시 하나로 보여 한꺼번에 막힐 수 있으니, 프록시는 서버와 같은 컴퓨터에 두세요.
+- `oidc`와 `password`를 오가도 저장된 비밀번호 해시는 지워지지 않습니다. 이전 버전 서버는 `auth = "password"` 설정을 읽지 못하고, 이전 버전 서버로 되돌려 한 번이라도 상태를 쓰면 저장된 비밀번호 해시가 사라집니다.
 
 ### 8-5. 한 연결은 한 프로젝트
 
@@ -342,7 +364,7 @@ sudo ./install.sh --start                             # 그 밖: tar.gz를 풀�
 ### 8-7. 관리 페이지와 보안 모델
 
 - `<public_url>/admin` — 한국어 관리 페이지(바이너리에 포함). 내 계정(토큰 발급·폐기), 사용자, 프로젝트, 전체 토큰, 감사 기록 탭이 있습니다.
-- 로그인은 Google OIDC(authorization code + PKCE). 세션은 서버 메모리에 있고(재시작하면 로그아웃) 쿠키는 `HttpOnly`, `SameSite=Lax`, https면 `Secure`입니다. 관리 API는 CSRF(JSON 타입 + `X-CSRF-Token` + Origin/Sec-Fetch-Site)와 `Host` 검사를 합니다.
+- 로그인은 Google OIDC(authorization code + PKCE) 또는 `auth = "password"`의 아이디·비밀번호([8-4-2](#8-4-2-아이디와-비밀번호로-쓰기-auth--password)). 세션은 서버 메모리에 있고(재시작하면 로그아웃) 쿠키는 `HttpOnly`, `SameSite=Lax`, https면 `Secure`입니다. 관리 API는 CSRF(JSON 타입 + `X-CSRF-Token` + Origin/Sec-Fetch-Site)와 `Host` 검사를 합니다.
 - 토큰은 `vhdb_<id 8자>_<32바이트 base64url>` 형식이고 서버에는 SHA-256 해시만 남습니다. 비밀은 발급 직후 한 번만 보입니다. 비교는 상수시간입니다.
 - 감사 로그는 로그인·토큰·프로젝트·권한 변경과 모든 `/v1` 요청(거부 포함)을 JSONL로 남깁니다. 토큰과 비밀은 남기지 않고, 검색어는 프로세스별 키의 HMAC 앞 16자와 길이만 남깁니다.
 - 요청 파서에는 한도가 있습니다: 요청 줄 8KiB, 헤더 64개, 본문 64KiB(토큰이 확인된 업로드는 4MiB), chunked 거부, 전체 20초 기한(슬로로리스 방지).
@@ -354,6 +376,7 @@ sudo ./install.sh --start                             # 그 밖: tar.gz를 풀�
 - 실제 Google 자격증명으로의 로그인 검증(가짜 Google 서버로는 전 과정을 검증함).
 - 퇴사자·유출 시 데이터 삭제 절차(로그 구조라 디렉터리 재구성이 필요).
 - 로그인 세션의 영속화(재시작하면 모두 로그아웃).
+- 비밀번호 모드의 2단계 인증과 메일로 비밀번호 찾기(분실하면 서버에서 `set-password`로 정함).
 
 ---
 
